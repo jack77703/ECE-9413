@@ -1,0 +1,264 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{url}
+
+\title{ECE-9413 Final Report: Negacyclic NTT and SumCheck Prover}
+
+\author{\IEEEauthorblockN{Jack}
+\IEEEauthorblockA{New York University\\
+ECE-9413}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report describes two exact finite-field kernels implemented in JAX: a
+negacyclic number theoretic transform (NTT) and a SumCheck prover. Both
+submitted implementations preserve the provided public APIs and pass the
+required correctness tests. The NTT implementation uses a twisted
+Cooley--Tukey schedule with Montgomery arithmetic and a GPU-oriented Pallas
+path, while the SumCheck implementation uses a general expression evaluator,
+serialized per-round folding, overflow-safe 32-bit arithmetic, and an optional
+64-bit core track. On the local CPU backend, the NTT reached 0.633 ms median
+latency for batch 4 and $N=16384$, or 103.59 Mcoeff/s. The required 32-bit
+SumCheck prover reached about 1.05 ms for the linear expression at vars20 and
+about 8.0 ms for the cubic expression. The main remaining limitation is that
+these measurements are local CPU measurements; GPU speedups should be added
+after running the same commands on the course GPU.
+\end{abstract}
+
+\section{Introduction}
+NTT and SumCheck are both central kernels in modern cryptographic proof and
+polynomial computation systems. They differ from ordinary dense floating-point
+GPU workloads because all arithmetic is exact modular integer arithmetic, where
+overflow behavior and reduction cost are part of the algorithm. The NTT is used
+to accelerate polynomial multiplication over finite fields. SumCheck reduces a
+large Boolean-hypercube sum to a sequence of low-degree univariate polynomial
+claims, making it a key primitive in proof systems.
+
+The project contributions are: (1) a batched negacyclic NTT using a
+twist-plus-cyclic NTT schedule and Montgomery reduction, (2) a required 32-bit
+SumCheck prover for the base expressions, (3) overflow-safe modular arithmetic
+for both required 32-bit and optional 64-bit SumCheck tracks, and (4) benchmark
+evidence tying correctness and performance claims to the submitted code. All
+reported commands were run on the local JAX CPU backend on macOS. No GPU result
+is claimed in this draft.
+
+\section{Assignment 1: Negacyclic NTT}
+\subsection{Design and Optimization}
+The implemented NTT evaluates
+\begin{equation}
+y[k] = \sum_{n=0}^{N-1} x[n]\psi^{(2k+1)n} \pmod q.
+\end{equation}
+The code uses the standard negacyclic decomposition: first multiply each input
+coefficient by the appropriate power of $\psi$, then run a cyclic
+Cooley--Tukey NTT. This structure fits the provided tables and keeps the hot
+path regular across the batch dimension.
+
+The modular arithmetic hot path uses unsigned 32-bit values, with widening only
+where multiplication requires it. The optimized path converts values into
+Montgomery form in \texttt{prepare\_tables}. The precomputed tables include a
+pretwisted $\psi$ table and Montgomery-form stage twiddles. The CPU path uses
+JAX reshapes and vectorized butterfly stages. The GPU-oriented path builds a
+Pallas kernel intended to fuse the stages for one row and then vmaps across the
+batch. This keeps the public API unchanged while moving table preparation out
+of the timed benchmark region.
+
+The most useful optimization was moving expensive table conversion and
+Montgomery constants into \texttt{prepare\_tables}. A less attractive approach
+would have been direct evaluation, which is simpler but has $O(N^2)$ work and
+does not scale. The final implementation stays with $O(N\log N)$ butterflies.
+
+\subsection{Correctness}
+Table~\ref{tab:a1-correctness} lists the correctness commands required by the
+guidelines. The benchmark test wrapper must be run with \texttt{uv --directory
+assignment1} from the repository root so its internal subprocess starts in the
+assignment directory.
+
+\begin{table}[h]
+\caption{Assignment 1 correctness checks}
+\label{tab:a1-correctness}
+\centering
+\begin{tabular}{ll}
+\toprule
+Command & Result \\
+\midrule
+\texttt{uv run pytest} via submission script & 5 passed \\
+\texttt{pytest --logn 10 --batch 4} & 5 passed \\
+\texttt{python -m tests.benchmark --tests --logn 10 --batch 4} & 5 passed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Performance}
+Table~\ref{tab:a1-perf} reports a CPU sweep at batch 4. The best throughput in
+this sweep occurs at $N=16384$, where the larger transform has enough work to
+amortize fixed overhead.
+
+\begin{table}[h]
+\caption{Assignment 1 CPU benchmark sweep, batch 4}
+\label{tab:a1-perf}
+\centering
+\begin{tabular}{rrrrr}
+\toprule
+$\log_2(N)$ & $N$ & Compile ms & Median ms & Mcoeff/s \\
+\midrule
+10 & 1024  & 462.84 & 0.057 & 71.29 \\
+12 & 4096  & 144.06 & 0.293 & 55.88 \\
+14 & 16384 & 161.24 & 0.633 & 103.59 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Assignment 2: SumCheck}
+\subsection{Design and Optimization}
+The SumCheck prover supports expressions represented as lists of additive
+terms, where each term is a list of multiplicative factors. This general
+evaluator supports the four required base expressions without hard-coding a
+separate kernel per expression. For an expression of degree $d$, each round
+emits $d+1$ evaluations of the round polynomial. Thus the linear expression
+\texttt{a} emits two values per round, \texttt{a*b} and \texttt{a*b + c} emit
+three, and \texttt{a*b*c} emits four.
+
+The implementation strictly follows the required round order. For each round,
+it first computes the round polynomial evaluations using the current tables.
+Only after that round does it fold the tables using the provided challenge.
+The code does not precompute challenge-folded tables ahead of time.
+
+For the required 32-bit track, multiplication still widens to 64 bits because a
+32-bit product can exceed 32 bits. Addition and subtraction, however, now avoid
+unnecessary 64-bit casts. \texttt{mod\_add\_32} detects uint32 wraparound and
+corrects by adding $2^{32}\bmod q$ before the final conditional subtraction.
+\texttt{mod\_sub\_32} computes the wrapped case as $q-(b-a)$, avoiding
+\texttt{a+q} overflow. This optimization keeps correctness on the edge cases
+while reducing the integer width used by common MLE and expression operations.
+
+The optional 64-bit core required a different approach. Since JAX does not
+provide a native uint128 type, direct 64-bit multiplication can lose high
+product bits. The submitted optional path uses two-limb Montgomery
+multiplication with 32-bit limbs for \texttt{mod\_mul\_64}, and pairwise
+overflow-safe modular addition for 64-bit reductions. This made the optional
+core64 correctness suite pass, although the required report baseline remains
+the 32-bit track.
+
+\subsection{READMEs}
+The Assignment 2 README was helpful for understanding the expected API, the
+required expressions, and the exact correctness and benchmark commands. The
+\texttt{sumcheck\_intro.md} walkthrough was especially useful for checking the
+round order and confirming that challenge-based MLE updates must occur
+between rounds rather than before the protocol begins. The custom-cases
+documentation was useful for understanding possible extra experiments, but the
+final required results here use the provided public cases.
+
+\subsection{Correctness}
+Table~\ref{tab:a2-correctness} reports the required 32-bit correctness
+commands. Each command passed all five public cases and all four base
+expressions for the selected variable count.
+
+\begin{table}[h]
+\caption{Assignment 2 required 32-bit correctness checks}
+\label{tab:a2-correctness}
+\centering
+\begin{tabular}{ll}
+\toprule
+Command & Result \\
+\midrule
+\texttt{pytest --bits 32 --num-vars 4} & 20/20 cases passed \\
+\texttt{pytest --bits 32 --num-vars 16} & 20/20 cases passed \\
+\texttt{pytest --bits 32 --num-vars 20} & 20/20 cases passed \\
+\texttt{bash scripts/make\_submission.sh} & 91 passed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Performance}
+The required benchmark commands were run with \texttt{--runs 8 --warmup 3} on
+the local CPU backend. Table~\ref{tab:a2-vars20} summarizes the final vars20
+run. The latency ordering follows expression degree and operation count:
+\texttt{a} is fastest, then \texttt{a*b}, then the two-term quadratic
+\texttt{a*b + c}, then the cubic expression \texttt{a*b*c}. As degree grows,
+the prover must emit more evaluation points per round and perform more modular
+multiplications per table element.
+
+\begin{table}[h]
+\caption{Assignment 2 vars20 CPU benchmark, 32-bit}
+\label{tab:a2-vars20}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Expression & Compile ms & Median ms & Mpts/s \\
+\midrule
+\texttt{a}       & 248--307 & 1.05--1.09 & 962--1002 \\
+\texttt{a*b}     & 524--542 & 3.47--3.70 & 284--302 \\
+\texttt{a*b + c} & 740--766 & 6.01--6.41 & 164--174 \\
+\texttt{a*b*c}   & 943--979 & 7.98--8.45 & 124--131 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:a2-scaling} shows representative median latency as the table
+size increases. The vars4 results are dominated by overhead, while vars16 and
+vars20 expose the cost of scanning and folding much larger arrays.
+
+\begin{table}[h]
+\caption{Assignment 2 scaling by variable count, representative CPU medians}
+\label{tab:a2-scaling}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Expression & vars4 ms & vars16 ms & vars20 ms \\
+\midrule
+\texttt{a}       & 0.005--0.006 & 0.13--0.16 & 1.05--1.09 \\
+\texttt{a*b}     & 0.007--0.011 & 0.36--0.39 & 3.47--3.70 \\
+\texttt{a*b + c} & 0.007--0.008 & 0.45--0.54 & 6.01--6.41 \\
+\texttt{a*b*c}   & 0.007--0.008 & 0.54--0.59 & 7.98--8.45 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Cross-Assignment Discussion}
+The main shared lesson is that modular arithmetic choices dominate both
+assignments. In the NTT, Montgomery form is effective because each butterfly
+does many modular multiplications with precomputed twiddles. In SumCheck, the
+required 32-bit path benefits more from carefully avoiding unnecessary widened
+addition and subtraction while still widening multiplication. The NTT is more
+structured: every stage has a regular butterfly layout and a predictable
+twiddle access pattern. SumCheck is more expression dependent: degree and term
+count directly change the amount of work per round.
+
+Memory movement also differs. NTT repeatedly permutes and combines arrays, so
+the schedule and table layout matter. SumCheck repeatedly halves the tables by
+MLE update; the largest rounds dominate runtime because later rounds quickly
+become small. This also explains why vars4 benchmark numbers are mostly
+overhead, while vars20 makes the differences between expressions visible.
+
+\section{AI Use Reflection}
+AI assistance was useful for quickly producing first-pass implementations,
+debugging edge cases, and designing benchmark commands. The most useful
+suggestion was to verify the optional 64-bit SumCheck path separately from the
+required 32-bit path; this exposed a broken 64-bit multiplication routine even
+though the required submission already passed. A plausible but poor suggestion
+was to implement 64-bit multiplication with a simple shift-and-add loop. That
+was correct but too slow for full vars16 and vars20 tests, so it was replaced
+with a two-limb Montgomery method. The best workflow was to keep AI suggestions
+tied to public tests and benchmark output rather than trusting code structure
+alone.
+
+\section{Conclusion}
+Both assignments pass their required public tests with the submitted code.
+Assignment 1 uses a Montgomery Cooley--Tukey negacyclic NTT and reached 0.633
+ms median latency for batch 4 and $N=16384$ on the local CPU backend.
+Assignment 2 uses a general SumCheck prover with serialized round folding and
+overflow-safe modular arithmetic; its vars20 CPU medians range from about 1.05
+ms for \texttt{a} to about 8.0 ms for \texttt{a*b*c}. The most important NTT
+optimization was moving Montgomery conversion and table preparation outside the
+hot path. The most important SumCheck optimization was keeping 32-bit add/sub
+operations in uint32 while still handling overflow correctly. The main
+remaining limitation is that this draft contains local CPU measurements only;
+course GPU measurements should be added before final submission if GPU results
+are expected.
+
+\end{document}

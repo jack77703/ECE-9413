@@ -25,22 +25,23 @@ import jax.numpy as jnp
 # ---------------------------------------------------------------------------
 
 def mod_add_32(a, b, q):
-    """(a + b) mod q — 32-bit.
-
-    q can be up to MAX_PRIME_32 ~ 2^32-5, so a+b may exceed 2^32.
-    Use uint64 intermediate to avoid overflow.
-    """
-    q64 = jnp.asarray(q, dtype=jnp.uint64)
-    s   = a.astype(jnp.uint64) + b.astype(jnp.uint64)
-    return jnp.where(s >= q64, s - q64, s).astype(jnp.uint32)
+    """(a + b) mod q — 32-bit with uint32 overflow correction."""
+    q32 = jnp.asarray(q, dtype=jnp.uint32)
+    a32 = jnp.asarray(a, dtype=jnp.uint32)
+    b32 = jnp.asarray(b, dtype=jnp.uint32)
+    s = a32 + b32
+    wrapped = s < a32
+    pow2_32_mod_q = jnp.uint32(0) - q32
+    s = jnp.where(wrapped, s + pow2_32_mod_q, s)
+    return jnp.where(s >= q32, s - q32, s)
 
 
 def mod_sub_32(a, b, q):
     """(a - b) mod q — 32-bit."""
-    a64 = a.astype(jnp.uint64)
-    b64 = b.astype(jnp.uint64)
-    q64 = jnp.asarray(q, dtype=jnp.uint64)
-    return jnp.where(a64 >= b64, a64 - b64, a64 + q64 - b64).astype(jnp.uint32)
+    q32 = jnp.asarray(q, dtype=jnp.uint32)
+    a32 = jnp.asarray(a, dtype=jnp.uint32)
+    b32 = jnp.asarray(b, dtype=jnp.uint32)
+    return jnp.where(a32 >= b32, a32 - b32, q32 - (b32 - a32))
 
 
 def mod_mul_32(a, b, q):
@@ -86,17 +87,78 @@ def mod_sub_64(a, b, q):
 def mod_mul_64(a, b, q):
     """(a * b) mod q — 64-bit without requiring a uint128 dtype."""
     q64 = jnp.asarray(q, dtype=jnp.uint64)
+    a64 = jnp.asarray(a, dtype=jnp.uint64) % q64
+    b64 = jnp.asarray(b, dtype=jnp.uint64) % q64
+
+    q0 = (q64 & jnp.uint64(0xFFFFFFFF)).astype(jnp.uint32)
+    inv = jnp.uint32(1)
+    for _ in range(5):
+        inv = inv * (jnp.uint32(2) - q0 * inv)
+    q_neg_inv = jnp.uint32(0) - inv
+
+    r_mod_q = jnp.uint64(0xFFFFFFFFFFFFFFFF) - q64 + jnp.uint64(1)
+    r2_mod_q = _mod_mul_64_shift_add(r_mod_q, r_mod_q, q64)
+
+    return _mont_mul_64(_mont_mul_64(a64, r2_mod_q, q64, q_neg_inv), b64, q64, q_neg_inv)
+
+
+def _mod_mul_64_shift_add(a, b, q):
+    """Scalar helper for precomputing Montgomery R^2 mod q."""
+    q64 = jnp.asarray(q, dtype=jnp.uint64)
     x = jnp.asarray(a, dtype=jnp.uint64) % q64
     y = jnp.asarray(b, dtype=jnp.uint64)
     acc = jnp.zeros_like(x, dtype=jnp.uint64)
 
-    # Russian peasant multiplication: keep every intermediate reduced mod q,
-    # so uint64 overflow is handled only through mod_add_64.
     for _ in range(64):
         acc = jnp.where((y & jnp.uint64(1)) != 0, mod_add_64(acc, x, q64), acc)
         x = mod_add_64(x, x, q64)
         y = y >> jnp.uint64(1)
     return acc
+
+
+def _mont_mul_64(a, b, q, q_neg_inv):
+    """Two-limb Montgomery multiplication with base 2^32."""
+    mask = jnp.uint64(0xFFFFFFFF)
+    q64 = jnp.asarray(q, dtype=jnp.uint64)
+    q0 = q64 & mask
+    q1 = q64 >> jnp.uint64(32)
+    a0 = jnp.asarray(a, dtype=jnp.uint64) & mask
+    a1 = jnp.asarray(a, dtype=jnp.uint64) >> jnp.uint64(32)
+    b0 = jnp.asarray(b, dtype=jnp.uint64) & mask
+    b1 = jnp.asarray(b, dtype=jnp.uint64) >> jnp.uint64(32)
+    r_mod_q = jnp.uint64(0xFFFFFFFFFFFFFFFF) - q64 + jnp.uint64(1)
+
+    t0 = jnp.zeros_like(a0, dtype=jnp.uint64)
+    t1 = jnp.zeros_like(a0, dtype=jnp.uint64)
+    t2 = jnp.zeros_like(a0, dtype=jnp.uint64)
+
+    for bi in (b0, b1):
+        uv = t0 + a0 * bi
+        t0 = uv & mask
+        carry = uv >> jnp.uint64(32)
+
+        uv = t1 + a1 * bi + carry
+        t1 = uv & mask
+        carry = uv >> jnp.uint64(32)
+        t2 = t2 + carry
+
+        m = (t0.astype(jnp.uint32) * q_neg_inv).astype(jnp.uint64)
+
+        uv = t0 + m * q0
+        carry = uv >> jnp.uint64(32)
+
+        uv = t1 + m * q1 + carry
+        t1 = uv & mask
+        carry = uv >> jnp.uint64(32)
+        t2 = t2 + carry
+
+        t0 = t1
+        t1 = t2 & mask
+        t2 = t2 >> jnp.uint64(32)
+
+    result = t0 | (t1 << jnp.uint64(32))
+    result = jnp.where(t2 != 0, mod_add_64(result, r_mod_q, q64), result)
+    return jnp.where(result >= q64, result - q64, result)
 
 
 # ---------------------------------------------------------------------------
