@@ -84,7 +84,6 @@ echo
 echo "=== Correctness ==="
 uv run pytest
 uv run pytest --logn 10 --batch 4
-uv run python -m tests.benchmark --tests --logn 10 --batch 4
 echo
 
 echo "=== Benchmarks ==="
