@@ -40,6 +40,7 @@ conda activate "${CONDA_ENV}" || true
 export PATH="\$HOME/.local/bin:\$PATH"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
+export COLUMNS="${COLUMNS:-220}"
 
 cd "${PROJECT_DIR}"
 mkdir -p hpc/logs hpc/results "${OUTPUT_DIR}"
