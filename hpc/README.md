@@ -15,7 +15,7 @@ They use the same Singularity pattern as your working example:
 ```bash
 singularity exec --nv \
   --overlay /scratch/cc9171/my_env/my_overlay.ext3:ro \
-  /share/apps/images/cuda11.8.86-cudnn8.7-devel-ubuntu22.04.2.sif
+  /share/apps/images/cuda12.3.2-cudnn9.0-devel-ubuntu22.04.1.sif
 ```
 
 ## 1. Copy Or Pull The Repo
@@ -37,6 +37,18 @@ CONDA_ENV=ece9413
 ```
 
 Override any of these with `sbatch --export=ALL,VAR=value`.
+
+If the default CUDA 12 image path does not exist on NYU HPC, list available CUDA images:
+
+```bash
+ls /share/apps/images/*cuda12*
+```
+
+Then submit with an explicit image path:
+
+```bash
+sbatch --export=ALL,SIF=/share/apps/images/YOUR_CUDA12_IMAGE.sif hpc/a1_ntt_a100.sbatch
+```
 
 ## 2. Environment Setup
 

@@ -17,7 +17,7 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/scratch/cc9171/ECE-9413}"
 OUTPUT_DIR="${OUTPUT_DIR:-/scratch/cc9171/ece9413_results}"
 OVERLAY="${OVERLAY:-/scratch/cc9171/my_env/my_overlay.ext3:ro}"
-SIF="${SIF:-/share/apps/images/cuda11.8.86-cudnn8.7-devel-ubuntu22.04.2.sif}"
+SIF="${SIF:-/share/apps/images/cuda12.3.2-cudnn9.0-devel-ubuntu22.04.1.sif}"
 CONDA_ENV="${CONDA_ENV:-ece9413}"
 A1_LOGNS="${A1_LOGNS:-10 12 14}"
 A1_BATCHES="${A1_BATCHES:-1 4 16}"
@@ -37,7 +37,6 @@ conda activate "${CONDA_ENV}" || true
 export PATH="\$HOME/.local/bin:\$PATH"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
-export LD_LIBRARY_PATH=""
 
 cd "${PROJECT_DIR}"
 mkdir -p hpc/logs hpc/results "${OUTPUT_DIR}"
@@ -77,6 +76,8 @@ import jax
 print("jax_version=", jax.__version__)
 print("default_backend=", jax.default_backend())
 print("devices=", jax.devices())
+if jax.default_backend() not in ("gpu", "cuda"):
+    raise SystemExit("JAX did not select a GPU backend; check CUDA image, driver, and JAX install.")
 PY
 echo
 
