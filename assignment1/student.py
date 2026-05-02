@@ -8,12 +8,13 @@ Optimisation notes
 * mod_add / mod_sub stay in uint32 — q < 2^31 means a+b < 2^32 (no overflow).
 * _mont_mul uses a uint32 wrap multiplication for 'm' (low-32 bits of T*q_inv)
   instead of a 64-bit multiply + 64-bit AND.
-* On GPU the entire NTT (all stages) is fused into a single Triton kernel via
-  jax.experimental.pallas so that intermediate data never hits global memory.
-  On CPU the same algorithm runs as plain JAX (pallas interpret-mode is skipped).
+* The default path uses pure JAX on both CPU and GPU. A Pallas prototype is kept
+  behind ECE9413_USE_PALLAS=1 because newer JAX versions reject the prototype's
+  captured scalar constants during kernel tracing.
 """
 
 import functools
+import os
 
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -29,6 +30,7 @@ _MONT = None          # dict of precomputed constants + tables
 _NTT_PALLAS = None   # compiled pallas callable (GPU only)
 
 _IS_GPU = jax.default_backend() == "gpu"
+_USE_PALLAS = os.environ.get("ECE9413_USE_PALLAS", "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +274,8 @@ def prepare_tables(*, q, psi_powers, twiddles):
     """
     Precompute and cache all constants needed by ntt().
 
-    * On GPU: compiles a Pallas kernel that fuses every butterfly stage.
-    * On CPU: precomputes typed JAX constants used by the pure-JAX path.
+    * By default: precomputes typed JAX constants used by the pure-JAX path.
+    * Optional: ECE9413_USE_PALLAS=1 tries the experimental Pallas kernel.
 
     Cost excluded from benchmark timing.
     """
@@ -314,9 +316,10 @@ def prepare_tables(*, q, psi_powers, twiddles):
     }
     _MONT.update(mc)
 
-    # Build the Pallas kernel on GPU; skip on CPU (pallas CPU = interpret only)
+    # The pure-JAX path is the default on GPU too. Keep the Pallas prototype
+    # opt-in because JAX 0.10 rejects kernels that capture scalar constants.
     _NTT_PALLAS = None
-    if _IS_GPU:
+    if _IS_GPU and _USE_PALLAS:
         try:
             _NTT_PALLAS = _build_pallas_ntt(
                 N, num_stages, q_int, int(mc["q_inv"]),
