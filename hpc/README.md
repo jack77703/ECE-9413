@@ -1,8 +1,33 @@
-# NYU HPC A100 Benchmark Jobs
+# HPC: A100 benchmarks (NYU Slurm)
 
-Run these from the repository root on the NYU HPC login node.
+Optional helpers for running **Assignment 1 (NTT)** and **Assignment 2 (SumCheck)** benchmarks on NYU’s Slurm cluster with an **NVIDIA A100** inside a **CUDA 12** Singularity image.
 
-These scripts are set up for the NYU ECE 9413 Spring 2026 A100 partition:
+Run commands from the **repository root** on an HPC login node (`ssh`, OnDemand shell, etc.).
+
+---
+
+## Defaults (override as needed)
+
+Scripts read environment variables so different users/paths do not require editing files:
+
+| Variable | Purpose |
+|----------|---------|
+| `PROJECT_DIR` | Git checkout of this repo on scratch |
+| `OUTPUT_DIR` | Where `.out` / `.err` / result text files are written |
+| `OVERLAY` | Singularity overlay with your Python/conda + `uv` (e.g. `.../my_overlay.ext3:ro`) |
+| `SIF` | CUDA-capable container image (e.g. under `/share/apps/images/`) |
+| `CONDA_ENV` | Conda env name inside the overlay |
+
+**Example (replace with your netid and paths):**
+
+```bash
+export PROJECT_DIR=/scratch/$USER/ECE-9413
+export OUTPUT_DIR=/scratch/$USER/ece9413_results
+export OVERLAY=/scratch/$USER/my_mamba/my_overlay.ext3:ro
+export CONDA_ENV=ece9413
+```
+
+Typical Slurm headers used for this course (confirm each semester with staff):
 
 ```bash
 #SBATCH --account=ece_gy_9143-2026sp
@@ -10,130 +35,112 @@ These scripts are set up for the NYU ECE 9413 Spring 2026 A100 partition:
 #SBATCH --gres=gpu:1
 ```
 
-They use the same Singularity pattern as your working example:
+---
+
+## One-time: sync the repo
 
 ```bash
-singularity exec --nv \
-  --overlay /scratch/cc9171/my_env/my_overlay.ext3:ro \
-  /share/apps/images/cuda12.3.2-cudnn9.0-devel-ubuntu22.04.1.sif
+cd "$PROJECT_DIR"
+git fetch && git status
+mkdir -p "$OUTPUT_DIR"
 ```
 
-## 1. Copy Or Pull The Repo
-
-Make sure the HPC copy has the latest code:
-
-```bash
-cd /scratch/cc9171/ECE-9413
-git status
-```
-
-By default, the scripts expect:
-
-```bash
-PROJECT_DIR=/scratch/cc9171/ECE-9413
-OUTPUT_DIR=/scratch/cc9171/ece9413_results
-OVERLAY=/scratch/cc9171/my_env/my_overlay.ext3:ro
-CONDA_ENV=ece9413
-```
-
-Override any of these with `sbatch --export=ALL,VAR=value`.
-
-If the default CUDA 12 image path does not exist on NYU HPC, list available CUDA images:
+If the default **CUDA image path** in the `.sbatch` file does not exist on the cluster, discover one:
 
 ```bash
 ls /share/apps/images/*cuda12*
 ```
 
-Then submit with an explicit image path:
+Submit with an explicit image:
 
 ```bash
-sbatch --export=ALL,SIF=/share/apps/images/YOUR_CUDA12_IMAGE.sif hpc/a1_ntt_a100.sbatch
+sbatch --export=ALL,SIF=/share/apps/images/YOUR_IMAGE.sif hpc/a1_ntt_a100.sbatch
 ```
 
-## 2. Environment Setup
+---
 
-The scripts try:
+## Environment inside the job
 
-```bash
-source /ext3/miniconda3/bin/activate
-conda activate ece9413 || true
-uv sync --extra cuda12
-```
+Jobs `singularity exec` the image, activate conda from the overlay (if present), then run `uv sync` / benchmarks.
 
-If your overlay uses a different conda env name, submit with:
-
-```bash
-sbatch --export=ALL,CONDA_ENV=YOUR_ENV hpc/a1_ntt_a100.sbatch
-```
-
-If `uv` is not installed in the overlay, install it inside your writable environment once, or install before submission:
+If `uv` is missing in the overlay, install once in a writable layer or on the login node’s user site-packages:
 
 ```bash
 python -m pip install --user uv
 export PATH="$HOME/.local/bin:$PATH"
-uv --version
 ```
 
-## 3. Submit Jobs
-
-From the repo root:
+To use a **different conda env name**:
 
 ```bash
-mkdir -p /scratch/cc9171/ece9413_results
+sbatch --export=ALL,CONDA_ENV=your_env_name hpc/a1_ntt_a100.sbatch
+```
+
+---
+
+## Submit jobs
+
+From repo root:
+
+```bash
 sbatch hpc/a1_ntt_a100.sbatch
 sbatch hpc/a2_sumcheck_a100.sbatch
 ```
 
-Check status:
+Check queue:
 
 ```bash
 squeue -u "$USER"
 ```
 
-## 4. Optional Overrides
+### Optional tuning
 
-Assignment 1 benchmark sweep:
+Assignment 1 sweep (example):
 
 ```bash
 sbatch --export=ALL,A1_LOGNS="10 12 14 15",A1_BATCHES="1 4 16" hpc/a1_ntt_a100.sbatch
 ```
 
-Assignment 2 benchmark settings:
+Assignment 2 benchmark iterations:
 
 ```bash
 sbatch --export=ALL,RUNS=8,WARMUP=3 hpc/a2_sumcheck_a100.sbatch
 ```
 
-Skip optional advanced and 64-bit checks if queue time is tight:
+Faster queue / shorter jobs (skip optional tracks):
 
 ```bash
 sbatch --export=ALL,RUN_CHALLENGE32=0,RUN_CORE64_CORRECTNESS=0 hpc/a2_sumcheck_a100.sbatch
 ```
 
-Run optional 64-bit benchmarks too:
+Optional 64-bit benchmarks:
 
 ```bash
 sbatch --export=ALL,RUN_CORE64_BENCH=1,CORE64_NUM_VARS="4 16" hpc/a2_sumcheck_a100.sbatch
 ```
 
-## 5. What To Send Back
+---
 
-After jobs finish, send or copy these files back:
+## Results to keep
 
-```bash
-/scratch/cc9171/ece9413_results/ece9413-a1-ntt-a100_*.out
-/scratch/cc9171/ece9413_results/ece9413-a1-ntt-a100_*.err
-/scratch/cc9171/ece9413_results/ece9413-a2-sumcheck-a100_*.out
-/scratch/cc9171/ece9413_results/ece9413-a2-sumcheck-a100_*.err
-/scratch/cc9171/ece9413_results/a1_ntt_a100_*.txt
-/scratch/cc9171/ece9413_results/a2_sumcheck_a100_*.txt
-```
+After completion, copy or archive files under **`OUTPUT_DIR`**, typically:
 
-The important checks inside each result file are:
+- `ece9413-a1-ntt-a100_*.out` / `*.err`
+- `ece9413-a2-sumcheck-a100_*.out` / `*.err`
+- Any summarized `.txt` artifacts written next to those logs
 
-- `default_backend= gpu` or `default_backend= cuda`
-- `nvidia-smi` shows an A100
-- correctness tests pass
-- benchmark tables list median latency, p90, and throughput
+**Sanity checks in the logs:**
 
-Those outputs will be used directly in `report/report.tex`.
+- JAX reports `gpu` / `cuda` backend (not CPU-only for GPU jobs)
+- `nvidia-smi` shows an **A100**
+- Correctness sections report **passed**
+- Benchmark tables include **median**, **p90**, and **throughput** where applicable
+
+Use those numbers in `report/report.tex` and note non-default hardware explicitly.
+
+---
+
+## Related documentation
+
+- Root overview: [`../README.md`](../README.md)
+- Assignment CLI details: `assignment1/README.md`, `assignment2/README.md`

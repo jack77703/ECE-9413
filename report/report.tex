@@ -1,10 +1,13 @@
 \documentclass[conference]{IEEEtran}
 
-\usepackage{booktabs}
-\usepackage{amsmath}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
 \usepackage{graphicx}
-\usepackage{url}
 \usepackage{array}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage[hidelinks]{hyperref}
 
 \title{ECE-9413 Final Report: Negacyclic NTT and SumCheck Prover}
 
@@ -19,38 +22,58 @@ ECE-9413}}
 This report describes two exact finite-field kernels implemented in JAX: a
 negacyclic number theoretic transform (NTT) and a SumCheck prover. Both
 submitted implementations preserve the provided public APIs and pass the
-required correctness tests. The NTT implementation uses a twisted
-Cooley--Tukey schedule with Montgomery arithmetic and a GPU-oriented Pallas
-path, while the SumCheck implementation uses a general expression evaluator,
-serialized per-round folding, overflow-safe 32-bit arithmetic, and an optional
-64-bit core track. On the A100 GPU, the NTT reached 5.7 Gcoeff/s at
-$N=65536$ and remained stable up to $N=2^{24}$. The required 32-bit SumCheck
-prover reached roughly 0.2--0.3 ms for the linear vars20 expression and
-roughly 0.5--0.6 ms for the cubic vars20 expression. The most useful failed
-experiment was replacing reshape-based NTT stages with \texttt{lax.fori\_loop}:
-compile time improved, but runtime regressed because the implementation lost
-contiguous reshape-based memory access. The main SumCheck optimization is not
-a protocol change; it is a cleaner JAX/XLA execution path with fewer
-integer-width conversions and less unused table dataflow.
+required correctness and benchmark checks documented below. The NTT uses a
+twisted Cooley--Tukey schedule with Montgomery multiplication on the butterfly
+hot path (\texttt{jit}/\texttt{vmap}, reshape-based stages, optional Pallas
+kernel off by default). The SumCheck prover uses a general expression
+evaluator, serialized rounds, uint32 overflow-safe add/sub with widening
+multiply for products, and MLE updates strictly after each round (no
+challenge pre-folding). On an NVIDIA A100--40GB (NYU HPC; beyond a typical
+single-GPU lab card), the NTT reached $\approx$5.7~Gcoeff/s at $N{=}65536$
+(batch~1) and remained at multi-Gcoeff/s through $N{=}2^{24}$. The required
+32-bit SumCheck vars20 GPU medians span $\approx$0.2--0.6~ms across the four
+base expressions; the same cases on a representative local CPU are orders of
+magnitude slower (for example, \texttt{a*b*c} at vars20 is $\approx$8~ms vs.\
+$\approx$0.55~ms on the A100 in our tables), so headline end-to-end speedups
+are dominated by table size and expression degree. Bonus work includes an
+optional 64-bit core with two-limb Montgomery \texttt{mod\_mul\_64} (full
+core64 tests passing) and three advanced polynomials on vars20. The main
+\textbf{failed} NTT experiment swapped reshape butterflies for
+\texttt{lax.fori\_loop}: compile time improved on small shapes but runtime
+roughly doubled once lowering lost contiguous access. The main \textbf{open
+limitation} is that measurements mix compiler effects (JAX/XLA compile time)
+with steady-state GPU latency; we separate them where possible, but both remain
+first-order for SumCheck at vars20.
 \end{abstract}
 
 \section{Introduction}
-NTT and SumCheck are both central kernels in modern cryptographic proof and
-polynomial computation systems. They differ from ordinary dense floating-point
-GPU workloads because all arithmetic is exact modular integer arithmetic, where
-overflow behavior and reduction cost are part of the algorithm. The NTT is used
-to accelerate polynomial multiplication over finite fields. SumCheck reduces a
-large Boolean-hypercube sum to a sequence of low-degree univariate polynomial
-claims, making it a key primitive in proof systems.
+NTT and SumCheck are central kernels in proof systems and symbolic
+cryptography: the NTT accelerates exact polynomial multiplication over finite
+fields, while SumCheck compresses a Boolean-hypercube exponential sum into a
+short interactive sequence of low-degree univariate checks. They differ from
+ordinary dense floating-point GPU work because every operation is modular,
+overflow is explicit, and reduction rules (Barrett/Montgomery-style arithmetic)
+often sit inside the innermost loops.
 
-The project contributions are: (1) a batched negacyclic NTT using a
-twist-plus-cyclic NTT schedule and Montgomery reduction, (2) a required 32-bit
-SumCheck prover for the base expressions, (3) overflow-safe modular arithmetic
-for both required 32-bit and optional 64-bit SumCheck tracks, and (4) benchmark
-evidence tying correctness and performance claims to the submitted code. All
-reported performance commands were run on an NVIDIA A100-SXM4-40GB GPU through
-the NYU HPC Slurm environment, with local CPU measurements retained as a
-baseline where useful.
+\textbf{Why these kernels matter here.} Both assignments stress the same
+systems challenge: get a high-level numerical idea (FFT-like recursion;
+Boolean cube folding) through a modern array compiler without silently changing
+semantics. JAX makes that easy to prototype but easy to break when integer
+widening, staging, or loop lowering change the graph.
+
+\textbf{What we validate and measure.} All required public tests pass for both
+assignments; Tables~\ref{tab:a1-correctness}--\ref{tab:a2-correctness} record
+the exact \texttt{uv}-based commands. Headline GPU numbers in this report come
+from batch~1 NTT sweeps and SumCheck \texttt{--bench} runs at vars4/16/20 with
+\texttt{--runs 8 --warmup 3} (32-bit required path), executed on an A100--40GB.
+CPU medians in Table~\ref{tab:a2-scaling} provide a complementary baseline on
+the same code paths.
+
+\textbf{Contributions.} (1)~batched negacyclic NTT with Montgomery butterflies
+and reshape scheduling; (2)~general SumCheck prover for the required
+expressions without per-expression hard wiring; (3)~optional 64-bit track and
+advanced polynomials as extra credit paths; and (4)~benchmark tables and
+figures traceable to those commands and hardware.
 
 \section{Assignment 1: Negacyclic NTT}
 \subsection{Design and Optimization}
@@ -85,53 +108,88 @@ forced an index/gather implementation instead of the zero-copy reshape pattern.
 The final implementation therefore stays with static reshape-based
 $O(N\log N)$ butterflies.
 
-\subsection{Correctness}
-Table~\ref{tab:a1-correctness} lists the correctness commands required by the
-guidelines. The benchmark test wrapper must be run with \texttt{uv --directory
-assignment1} from the repository root so its internal subprocess starts in the
-assignment directory.
+At the largest measured sizes ($N=2^{24}$, batch~1), throughput falls from its
+peak near $N=2^{16}$, which is consistent with a shift toward \emph{memory-bound}
+behavior as arrays outgrow on-chip reuse. At moderate $N$ with batch~1, the
+kernel is more \emph{compute- and launch-latency sensitive} before bandwidth
+fully dominates; we did not build a calibrated roofline plot, but the sweep in
+Figure~\ref{fig:ntt-throughput} makes the qualitative turnover visible.
 
-\begin{table*}[!t]
-\caption{Assignment 1 correctness checks}
+\subsection{Correctness}
+Table~\ref{tab:a1-correctness} matches the course checklist. From the
+repository root, prefix Assignment~1 commands with
+\texttt{uv --directory assignment1}; the internal benchmark wrapper changes its
+working directory accordingly.
+
+\begin{table}[t]
+\caption{Assignment 1 correctness checks (\texttt{uv --directory assignment1})}
 \label{tab:a1-correctness}
 \centering
 \footnotesize
-\setlength{\tabcolsep}{5pt}
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.78\textwidth}l@{}}
-\toprule
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.62\columnwidth}l@{}}
+\hline
 Command & Result \\
-\midrule
-\texttt{uv run pytest} via submission script & 5 passed \\
-\texttt{pytest --logn 10 --batch 4} & 5 passed \\
-\texttt{python -m tests.benchmark}\newline\texttt{--tests --logn 10 --batch 4} & 5 passed \\
-\bottomrule
+\hline
+\texttt{uv run pytest} & 5 passed \\
+\texttt{uv run pytest --logn 10 --batch 4} & 5 passed \\
+\texttt{uv run python -m tests.benchmark}\newline\texttt{--tests --logn 10 --batch 4} & 5 passed \\
+\hline
 \end{tabular}
-\end{table*}
+\end{table}
 
 \subsection{Performance}
-Table~\ref{tab:a1-perf} reports the A100 sweep from the NTT presentation
-experiments. Throughput peaks near $N=65536$, where the transform has enough
-work to amortize launch overhead while still fitting well in the memory
-hierarchy. At $N=2^{24}$, throughput drops, suggesting that HBM traffic and L2
-capacity become more important than launch overhead.
+Table~\ref{tab:a1-perf} lists the measured batch~1 sweep on an A100--40GB.
+Figure~\ref{fig:ntt-throughput} plots the Mcoeff/s column from
+Table~\ref{tab:a1-perf}: it peaks near $N=65536$, where there is enough
+parallelism to amortize launches while arrays still fit relatively well for
+reuse, then softens at $N=2^{24}$ as traffic dominates.
 
-\begin{table*}[!t]
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.95\columnwidth,
+  height=0.62\columnwidth,
+  xlabel={$\log_2 N$},
+  ylabel={Throughput (Mcoeff/s)},
+  xmin=8, xmax=26,
+  ymin=0, ymax=6200,
+  grid=both,
+  major grid style={line width=.25pt,draw=gray!40},
+  tick align=outside,
+]
+\addplot+[thick,mark=*] coordinates {
+  (10, 50)
+  (16, 5711)
+  (20, 5100)
+  (24, 3625)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{NTT throughput vs.\ $\log_2(N)$ (A100--40GB, batch~1).}
+\label{fig:ntt-throughput}
+\end{figure}
+
+\begin{table}[t]
 \caption{Assignment 1 A100 scaling sweep, batch 1}
 \label{tab:a1-perf}
 \centering
 \footnotesize
-\setlength{\tabcolsep}{4pt}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{@{}rrrrr@{}}
-\toprule
+\hline
 $\log_2(N)$ & $N$ & Compile (ms) & Median (ms) & Mcoeff/s \\
-\midrule
+\hline
 10 & 1024     & 709  & 0.081 & 50 \\
 16 & 65536    & 1700 & 0.734 & 5711 \\
 20 & 1048576  & 2346 & 6.58  & 5100 \\
 24 & 16777216 & 7031 & 37.0  & 3625 \\
-\bottomrule
-\end{tabular}
-\end{table*}
+\hline
+\end{tabular}%
+}
+\end{table}
 
 \section{Assignment 2: SumCheck}
 \subsection{Design and Optimization}
@@ -148,6 +206,14 @@ it first computes the round polynomial evaluations using the current tables.
 Only after that round does it fold the tables using the provided challenge.
 The code does not precompute challenge-folded tables ahead of time.
 
+\paragraph{MLE updates.}
+Folds use the standard MLE update with \emph{full} modular multiplication
+and reduction on the active limb width (no unproven ``fast'' fold that skips
+modular reduction). In our implementation the update is scheduled
+\emph{after} emitting each round polynomial, matching the course note that
+challenges are revealed between rounds and that pre-folding for speed would be
+out of spec.
+
 For the required 32-bit track, multiplication still widens to 64 bits because a
 32-bit product can exceed 32 bits. Addition and subtraction, however, now avoid
 unnecessary 64-bit casts. \texttt{mod\_add\_32} detects uint32 wraparound and
@@ -156,12 +222,29 @@ corrects by adding $2^{32}\bmod q$ before the final conditional subtraction.
 \texttt{a+q} overflow. This optimization keeps correctness on the edge cases
 while reducing the integer width used by common MLE and expression operations.
 
+\textit{Ideas carried from Assignment~1 versus SumCheck specifics.}
+The NTT relies on Montgomery multiplication as the \emph{workhorse} on the
+butterfly because every stage multiplies by twiddles under a fixed modulus.
+SumCheck instead spends most of its time scanning and folding large tables and
+evaluating low-degree round polynomials; the high-value trick on the 32-bit
+path is to keep add/sub in \texttt{uint32} with explicit wrap semantics while
+still widening products. The optional 64-bit track \emph{does} reuse Montgomery
+ideas (two-limb \texttt{mod\_mul\_64}) because native 64-bit products are
+insufficient to recover full double-width products inside JAX.
+
 The implementation also reduces unused dataflow. The working dictionary is
 filtered to the polynomial tables that appear in the current expression, so
 \texttt{a} carries only table \texttt{a}, and \texttt{a*b} carries only
 \texttt{a} and \texttt{b}. Expression accumulation starts from the first term
 instead of a zero vector, avoiding one redundant modular addition for each
 expression evaluation.
+
+\textbf{Bonus tracks attempted.}
+\textit{(i)}~Optional 64-bit core: two-limb Montgomery \texttt{mod\_mul\_64}
+and reduction-friendly adds; \textit{(ii)}~advanced polynomials at vars20
+(Table~\ref{tab:a2-advanced}); \textit{(iii)}~aggregate packaging checks via
+\texttt{bash scripts/make\_submission.sh}. We did \emph{not} pursue the
+\texttt{sumcheck\_128} track or the optional hashing-between-rounds track.
 
 The optional 64-bit core required a different approach. Since JAX does not
 provide a native uint128 type, direct 64-bit multiplication can lose high
@@ -172,86 +255,181 @@ core64 correctness suite pass, although the required report baseline remains
 the 32-bit track.
 
 \subsection{READMEs}
-The Assignment 2 README was helpful for understanding the expected API, the
-required expressions, and the exact correctness and benchmark commands. The
-\texttt{sumcheck\_intro.md} walkthrough was especially useful for checking the
-round order and confirming that challenge-based MLE updates must occur
-between rounds rather than before the protocol begins. The custom-cases
-documentation was useful for understanding possible extra experiments, but the
-final required results here use the provided public cases.
+This section records which course artifacts we actually used; skipping a
+resource is not penalized, but the section is required.
+
+\textbf{Assignment 1 README.} Helpful for the public API surface, the benchmark
+entry points, and the expectation that table preparation can live outside the
+hot timed region.
+
+\textbf{Assignment 2 README and \texttt{sumcheck\_intro.md}.} The README
+clarified required expressions and command lines; \texttt{sumcheck\_intro.md}
+was especially useful for \emph{round order} and the policy that challenges
+fold tables \emph{after} a round's polynomial is emitted, not ahead of the
+protocol.
+
+\textbf{Other references.} No external papers were necessary beyond course
+material; JAX/XLA documentation was useful for interpreting compile-time vs.\
+runtime effects.
+
+\textbf{Custom cases.} We read the custom-cases notes for ideas but report only
+the public benchmarks and optional advanced polynomials exercised by our code
+path.
 
 \subsection{Correctness}
-Table~\ref{tab:a2-correctness} reports the required 32-bit correctness
-commands. Each command passed all five public cases and all four base
-expressions for the selected variable count.
+Table~\ref{tab:a2-correctness} lists the three required 32-bit commands. In our
+environment they were launched from the repository root with
+\texttt{uv --directory assignment2}. We also ran \texttt{bash scripts/make\_submission.sh}
+as an aggregate bundle before packaging (91 tests passed).
 
-\begin{table*}[!t]
-\caption{Assignment 2 required 32-bit correctness checks}
+\begin{table}[t]
+\caption{Assignment 2 required 32-bit correctness (\texttt{uv --directory assignment2})}
 \label{tab:a2-correctness}
 \centering
 \footnotesize
-\setlength{\tabcolsep}{5pt}
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.78\textwidth}l@{}}
-\toprule
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.62\columnwidth}l@{}}
+\hline
 Command & Result \\
-\midrule
-\texttt{pytest --bits 32 --num-vars 4} & 20/20 cases passed \\
-\texttt{pytest --bits 32 --num-vars 16} & 20/20 cases passed \\
-\texttt{pytest --bits 32 --num-vars 20} & 20/20 cases passed \\
-\texttt{bash scripts/make\_submission.sh} & 91 passed \\
-\bottomrule
+\hline
+\texttt{uv run pytest --bits 32 --num-vars 4} & 20/20 passed \\
+\texttt{uv run pytest --bits 32 --num-vars 16} & 20/20 passed \\
+\texttt{uv run pytest --bits 32 --num-vars 20} & 20/20 passed \\
+\hline
 \end{tabular}
-\end{table*}
+\end{table}
 
 \subsection{Performance}
-The required benchmark commands were run with \texttt{--runs 8 --warmup 3} on
-an A100 GPU. Table~\ref{tab:a2-vars20} summarizes the final vars20 runs using
-ranges from the five public cases. The latency ordering follows expression
-degree and operation count:
-\texttt{a} is fastest, then \texttt{a*b}, then the two-term quadratic
-\texttt{a*b + c}, then the cubic expression \texttt{a*b*c}. As degree grows,
-the prover must emit more evaluation points per round and perform more modular
-multiplications per table element.
+\subsubsection{Figures}
+Figures~\ref{fig:sc-expr} and \ref{fig:sc-scale} summarize SumCheck latency
+trends using representative \emph{midpoints} of the measured ranges in
+Tables~\ref{tab:a2-vars20} and \ref{tab:a2-scaling} (GPU at vars20; CPU scaling).
 
-\begin{table*}[!t]
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.95\columnwidth,
+  height=0.62\columnwidth,
+  ybar,
+  bar width=8pt,
+  ymin=0, ymax=0.65,
+  ylabel={Median time (ms)},
+  symbolic x coords={E1,E2,E3,E4},
+  xtick=data,
+  xticklabels={\texttt{a},\texttt{a*b},\texttt{a*b+c},\texttt{a*b*c}},
+  x tick label style={font=\footnotesize\ttfamily},
+  enlarge x limits=0.12,
+  grid=major,
+  major grid style={line width=.25pt,draw=gray!40},
+]
+\addplot coordinates {(E1,0.25) (E2,0.35) (E3,0.45) (E4,0.55)};
+\end{axis}
+\end{tikzpicture}
+\caption{Representative vars20 GPU medians (A100--40GB, 32-bit) across base
+expressions; midpoints of Table~\ref{tab:a2-vars20} ranges.}
+\label{fig:sc-expr}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.95\columnwidth,
+  height=0.62\columnwidth,
+  xlabel={Number of variables},
+  ymode=log,
+  ylabel={Median time (ms, log)},
+  xmin=2, xmax=22,
+  xtick={4,16,20},
+  legend style={font=\footnotesize,at={(0.5,1.03)},anchor=south,legend columns=2},
+  grid=both,
+  major grid style={line width=.25pt,draw=gray!40},
+]
+\addplot+[thick,mark=*] coordinates {(4,0.00625) (16,0.145) (20,1.07)};
+\addlegendentry{\texttt{a}}
+\addplot+[thick,mark=square*] coordinates {(4,0.009) (16,0.375) (20,3.585)};
+\addlegendentry{\texttt{a*b*c}}
+\end{axis}
+\end{tikzpicture}
+\caption{CPU scaling (representative midpoints from Table~\ref{tab:a2-scaling})
+for \texttt{a} vs.\ \texttt{a*b*c}, illustrating table-driven growth.}
+\label{fig:sc-scale}
+\end{figure}
+
+\subsubsection{Benchmarks}
+Table~\ref{tab:a2-bench-cmds} records the required \texttt{--bench} driver
+lines. Extracted latency/throughput summaries appear in
+Tables~\ref{tab:a2-vars20}--\ref{tab:a2-compile}; compile-time-focused
+comparisons isolate JAX/XLA staging effects at vars20.
+
+\begin{table}[t]
+\caption{Required SumCheck benchmark commands (\texttt{uv --directory assignment2})}
+\label{tab:a2-bench-cmds}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.62\columnwidth}@{}}
+\hline
+Command \\
+\hline
+\texttt{uv run python -m tests.benchmark --bench --bits 32 --num-vars 4 --runs 8 --warmup 3} \\
+\texttt{uv run python -m tests.benchmark --bench --bits 32 --num-vars 16 --runs 8 --warmup 3} \\
+\texttt{uv run python -m tests.benchmark --bench --bits 32 --num-vars 20 --runs 8 --warmup 3} \\
+\hline
+\end{tabular}
+\end{table}
+
+Across vars20 GPU runs, median latency ranks the base expressions as
+\texttt{a} $<$ \texttt{a*b} $<$ \texttt{a*b + c} $<$ \texttt{a*b*c}. This lines
+up with polynomial degree (more round-evaluation points per round) and with the
+extra multiplies in the evaluator, not with a change in table footprint (all
+cases use the same $2^{20}$-row tables for a given variable count). Compile
+time also grows with evaluator complexity; Table~\ref{tab:a2-compile} shows
+that implementation choices can move compile time materially even when median
+run time stays in the same band.
+
+\begin{table}[t]
 \caption{Assignment 2 vars20 A100 benchmark, 32-bit}
 \label{tab:a2-vars20}
 \centering
 \footnotesize
-\setlength{\tabcolsep}{4pt}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{@{}lrrr@{}}
-\toprule
+\hline
 Expression & Compile (ms) & Median (ms) & Mpts/s \\
-\midrule
+\hline
 \texttt{a}       & $\approx$2083--2387 & 0.2--0.3 & 3330--4290 \\
 \texttt{a*b}     & $\approx$3792--4175 & 0.3--0.4 & 2420--3030 \\
 \texttt{a*b + c} & $\approx$4832--5271 & 0.4--0.5 & 2080--2530 \\
 \texttt{a*b*c}   & $\approx$6299--6890 & 0.5--0.6 & 1890--2170 \\
-\bottomrule
-\end{tabular}
-\end{table*}
+\hline
+\end{tabular}%
+}
+\end{table}
 
 Table~\ref{tab:a2-advanced} reports the optional 32-bit advanced polynomials
 on vars20. These are not required for the base benchmark, but they demonstrate
 that the general expression evaluator supports repeated factors and multiple
 additive terms without special-case kernels.
 
-\begin{table*}[!t]
+\begin{table}[t]
 \caption{Assignment 2 vars20 A100 advanced polynomials, 32-bit}
 \label{tab:a2-advanced}
 \centering
 \footnotesize
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}lrr@{}}
-\toprule
+\hline
 Expression & Median (ms) & Mpts/s \\
-\midrule
+\hline
 \texttt{a*a*b*b*c}       & 0.7--0.8 & 1200--1390 \\
 \texttt{a*b*c + d*e}     & 0.5--0.6 & 1520--1800 \\
 \texttt{a*b*c*g + d*e*g} & 0.7--0.8 & 1210--1390 \\
-\bottomrule
+\hline
 \end{tabular}
-\end{table*}
+\end{table}
 
 Table~\ref{tab:a2-compile} compares the final implementation against the
 teammate/reference implementation on the same A100 vars20 benchmark. Both
@@ -261,44 +439,48 @@ widening operations in add/sub, less unused table dataflow, and fewer redundant
 modular additions. Runtime remains close because both versions still scan and
 fold the same $2^{20}$-entry tables.
 
-\begin{table*}[!t]
+\begin{table}[t]
 \caption{Assignment 2 vars20 compile-time comparison}
 \label{tab:a2-compile}
 \centering
 \footnotesize
-\setlength{\tabcolsep}{4pt}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{@{}lrrr@{}}
-\toprule
+\hline
 Expression & Reference (ms) & Final (ms) & Improvement \\
-\midrule
+\hline
 \texttt{a}       & 2457 & 2173 & 12\% \\
 \texttt{a*b}     & 4604 & 3941 & 14\% \\
 \texttt{a*b + c} & 5312 & 5059 & 5\% \\
 \texttt{a*b*c}   & 7368 & 6624 & 10\% \\
-\bottomrule
-\end{tabular}
-\end{table*}
+\hline
+\end{tabular}%
+}
+\end{table}
 
 The local CPU baseline is retained in Table~\ref{tab:a2-scaling}. It shows the
 same expression ordering, but with much higher vars20 latency.
 
-\begin{table*}[!t]
+\begin{table}[t]
 \caption{Assignment 2 scaling by variable count, representative CPU medians}
 \label{tab:a2-scaling}
 \centering
 \footnotesize
-\setlength{\tabcolsep}{3pt}
+\setlength{\tabcolsep}{2pt}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{@{}lrrr@{}}
-\toprule
+\hline
 Expression & vars4 (ms) & vars16 (ms) & vars20 (ms) \\
-\midrule
+\hline
 \texttt{a}       & 0.005--0.006 & 0.13--0.16 & 1.05--1.09 \\
 \texttt{a*b}     & 0.007--0.011 & 0.36--0.39 & 3.47--3.70 \\
 \texttt{a*b + c} & 0.007--0.008 & 0.45--0.54 & 6.01--6.41 \\
 \texttt{a*b*c}   & 0.007--0.008 & 0.54--0.59 & 7.98--8.45 \\
-\bottomrule
-\end{tabular}
-\end{table*}
+\hline
+\end{tabular}%
+}
+\end{table}
 
 \section{Cross-Assignment Discussion}
 The main shared lesson is that modular arithmetic choices dominate both
@@ -316,6 +498,14 @@ MLE update; the largest rounds dominate runtime because later rounds quickly
 become small. This also explains why vars4 benchmark numbers are mostly
 overhead, while vars20 makes the differences between expressions visible.
 
+\textit{Multiplication vs.\ memory.}
+The NTT is more sensitive to steady-state modular multiplication throughput on
+butterfly edges (Montgomery mul is the inner loop). SumCheck at vars20 is more
+sensitive to traversing large tables under a deep JAX graph: multiplication
+cost still matters---especially as polynomial degree grows---but bandwidth,
+cache footprint, and XLA compile time surface as first-order effects alongside
+raw mul latency.
+
 \section{AI Use Reflection}
 AI assistance was useful for quickly producing first-pass implementations,
 debugging edge cases, and designing benchmark commands. The most useful
@@ -329,17 +519,17 @@ tied to public tests and benchmark output rather than trusting code structure
 alone.
 
 \section{Conclusion}
-Both assignments pass their required public tests with the submitted code.
-Assignment 1 uses a Montgomery reshape-based negacyclic NTT and reached 5.7
-Gcoeff/s on the A100 at $N=65536$.
-Assignment 2 uses a general SumCheck prover with serialized round folding and
-overflow-safe modular arithmetic; on the A100, its vars20 medians range from
-roughly 0.2--0.3 ms for \texttt{a} to roughly 0.5--0.6 ms for
-\texttt{a*b*c}. The most important NTT optimization was moving Montgomery
-conversion and table preparation outside the hot path. The most important
-SumCheck optimization was keeping 32-bit add/sub operations in uint32 while
-still handling overflow correctly. On the A100, the SumCheck implementation
-shows about 5--14\% lower vars20 compile time than the reference implementation
-while preserving competitive runtime and correctness.
+Both assignments pass the course-required public checks cited above. On an
+A100--40GB, the reshape-based negacyclic NTT reaches $\approx$5.7~Gcoeff/s at
+$N{=}65536$ (batch~1). The 32-bit SumCheck prover reaches $\approx$0.2--0.6~ms
+vars20 medians across the four base expressions on the same GPU, with clear
+CPU-vs-GPU separation in Figure~\ref{fig:sc-scale}. The most important NTT
+optimization was keeping butterflies on contiguous reshape paths while
+relocating Montgomery setup to \texttt{prepare\_tables}. The most important
+SumCheck optimizations were protocol-faithful scheduling (no challenge
+pre-folding) and reducing unnecessary widening in the 32-bit add/sub path.
+\textbf{Main limitation:} first-run JAX/XLA compilation remains a large fraction
+of wall time at vars20, and our headline GPU numbers come from HPC-class
+hardware rather than a minimal lab GPU.
 
 \end{document}
