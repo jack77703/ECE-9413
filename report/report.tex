@@ -4,6 +4,7 @@
 \usepackage{amsmath}
 \usepackage{graphicx}
 \usepackage{url}
+\usepackage{array}
 
 \title{ECE-9413 Final Report: Negacyclic NTT and SumCheck Prover}
 
@@ -90,20 +91,22 @@ guidelines. The benchmark test wrapper must be run with \texttt{uv --directory
 assignment1} from the repository root so its internal subprocess starts in the
 assignment directory.
 
-\begin{table}[h]
+\begin{table*}[!t]
 \caption{Assignment 1 correctness checks}
 \label{tab:a1-correctness}
 \centering
-\begin{tabular}{ll}
+\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.78\textwidth}l@{}}
 \toprule
 Command & Result \\
 \midrule
 \texttt{uv run pytest} via submission script & 5 passed \\
 \texttt{pytest --logn 10 --batch 4} & 5 passed \\
-\texttt{python -m tests.benchmark --tests --logn 10 --batch 4} & 5 passed \\
+\texttt{python -m tests.benchmark}\newline\texttt{--tests --logn 10 --batch 4} & 5 passed \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 \subsection{Performance}
 Table~\ref{tab:a1-perf} reports the A100 sweep from the NTT presentation
@@ -112,13 +115,15 @@ work to amortize launch overhead while still fitting well in the memory
 hierarchy. At $N=2^{24}$, throughput drops, suggesting that HBM traffic and L2
 capacity become more important than launch overhead.
 
-\begin{table}[h]
+\begin{table*}[!t]
 \caption{Assignment 1 A100 scaling sweep, batch 1}
 \label{tab:a1-perf}
 \centering
-\begin{tabular}{rrrrr}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}rrrrr@{}}
 \toprule
-$\log_2(N)$ & $N$ & Compile ms & Median ms & Mcoeff/s \\
+$\log_2(N)$ & $N$ & Compile (ms) & Median (ms) & Mcoeff/s \\
 \midrule
 10 & 1024     & 709  & 0.081 & 50 \\
 16 & 65536    & 1700 & 0.734 & 5711 \\
@@ -126,7 +131,7 @@ $\log_2(N)$ & $N$ & Compile ms & Median ms & Mcoeff/s \\
 24 & 16777216 & 7031 & 37.0  & 3625 \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 \section{Assignment 2: SumCheck}
 \subsection{Design and Optimization}
@@ -180,11 +185,13 @@ Table~\ref{tab:a2-correctness} reports the required 32-bit correctness
 commands. Each command passed all five public cases and all four base
 expressions for the selected variable count.
 
-\begin{table}[h]
+\begin{table*}[!t]
 \caption{Assignment 2 required 32-bit correctness checks}
 \label{tab:a2-correctness}
 \centering
-\begin{tabular}{ll}
+\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.78\textwidth}l@{}}
 \toprule
 Command & Result \\
 \midrule
@@ -194,7 +201,7 @@ Command & Result \\
 \texttt{bash scripts/make\_submission.sh} & 91 passed \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 \subsection{Performance}
 The required benchmark commands were run with \texttt{--runs 8 --warmup 3} on
@@ -206,13 +213,15 @@ degree and operation count:
 the prover must emit more evaluation points per round and perform more modular
 multiplications per table element.
 
-\begin{table}[h]
+\begin{table*}[!t]
 \caption{Assignment 2 vars20 A100 benchmark, 32-bit}
 \label{tab:a2-vars20}
 \centering
-\begin{tabular}{lrrr}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrr@{}}
 \toprule
-Expression & Compile ms & Median ms & Mpts/s \\
+Expression & Compile (ms) & Median (ms) & Mpts/s \\
 \midrule
 \texttt{a}       & $\approx$2083--2387 & 0.2--0.3 & 3330--4290 \\
 \texttt{a*b}     & $\approx$3792--4175 & 0.3--0.4 & 2420--3030 \\
@@ -220,27 +229,29 @@ Expression & Compile ms & Median ms & Mpts/s \\
 \texttt{a*b*c}   & $\approx$6299--6890 & 0.5--0.6 & 1890--2170 \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 Table~\ref{tab:a2-advanced} reports the optional 32-bit advanced polynomials
 on vars20. These are not required for the base benchmark, but they demonstrate
 that the general expression evaluator supports repeated factors and multiple
 additive terms without special-case kernels.
 
-\begin{table}[h]
+\begin{table*}[!t]
 \caption{Assignment 2 vars20 A100 advanced polynomials, 32-bit}
 \label{tab:a2-advanced}
 \centering
-\begin{tabular}{lrr}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrr@{}}
 \toprule
-Expression & Median ms & Mpts/s \\
+Expression & Median (ms) & Mpts/s \\
 \midrule
 \texttt{a*a*b*b*c}       & 0.7--0.8 & 1200--1390 \\
 \texttt{a*b*c + d*e}     & 0.5--0.6 & 1520--1800 \\
 \texttt{a*b*c*g + d*e*g} & 0.7--0.8 & 1210--1390 \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 Table~\ref{tab:a2-compile} compares the final implementation against the
 teammate/reference implementation on the same A100 vars20 benchmark. Both
@@ -250,13 +261,15 @@ widening operations in add/sub, less unused table dataflow, and fewer redundant
 modular additions. Runtime remains close because both versions still scan and
 fold the same $2^{20}$-entry tables.
 
-\begin{table}[h]
+\begin{table*}[!t]
 \caption{Assignment 2 vars20 compile-time comparison}
 \label{tab:a2-compile}
 \centering
-\begin{tabular}{lrrr}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrr@{}}
 \toprule
-Expression & Reference ms & Final ms & Improvement \\
+Expression & Reference (ms) & Final (ms) & Improvement \\
 \midrule
 \texttt{a}       & 2457 & 2173 & 12\% \\
 \texttt{a*b}     & 4604 & 3941 & 14\% \\
@@ -264,18 +277,20 @@ Expression & Reference ms & Final ms & Improvement \\
 \texttt{a*b*c}   & 7368 & 6624 & 10\% \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 The local CPU baseline is retained in Table~\ref{tab:a2-scaling}. It shows the
 same expression ordering, but with much higher vars20 latency.
 
-\begin{table}[h]
+\begin{table*}[!t]
 \caption{Assignment 2 scaling by variable count, representative CPU medians}
 \label{tab:a2-scaling}
 \centering
-\begin{tabular}{lrrr}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrr@{}}
 \toprule
-Expression & vars4 ms & vars16 ms & vars20 ms \\
+Expression & vars4 (ms) & vars16 (ms) & vars20 (ms) \\
 \midrule
 \texttt{a}       & 0.005--0.006 & 0.13--0.16 & 1.05--1.09 \\
 \texttt{a*b}     & 0.007--0.011 & 0.36--0.39 & 3.47--3.70 \\
@@ -283,7 +298,7 @@ Expression & vars4 ms & vars16 ms & vars20 ms \\
 \texttt{a*b*c}   & 0.007--0.008 & 0.54--0.59 & 7.98--8.45 \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 \section{Cross-Assignment Discussion}
 The main shared lesson is that modular arithmetic choices dominate both
