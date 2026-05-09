@@ -4,6 +4,8 @@
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
 \usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
 \usepackage{tikz}
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.18}
@@ -11,7 +13,7 @@
 
 \title{ECE-9413 Final Report: Negacyclic NTT and SumCheck Prover}
 
-\author{\IEEEauthorblockN{Koshiq Hossain (kh3134) \and Jack Chou (cc9171)}
+\author{\IEEEauthorblockN{Koshiq Hossain (kh3134)\qquad Jack Chou (cc9171)}
 \IEEEauthorblockA{New York University\\
 ECE-9413}}
 
@@ -46,11 +48,14 @@ with steady-state GPU latency; we separate them where possible, but both remain
 first-order for SumCheck at vars20.
 \end{abstract}
 
-\section{Introduction}
+\begin{IEEEkeywords}
+Number Theoretic Transform, SumCheck protocol, JAX, XLA, GPU acceleration,
+finite field arithmetic, multilinear extension
+\end{IEEEkeywords}
 NTT and SumCheck are central kernels in proof systems and symbolic
 cryptography: the NTT accelerates exact polynomial multiplication over finite
 fields, while SumCheck compresses a Boolean-hypercube exponential sum into a
-short interactive sequence of low-degree univariate checks. They differ from
+short interactive sequence of low-degree univariate checks \cite{thaler2015}. They differ from
 ordinary dense floating-point GPU work because every operation is modular,
 overflow is explicit, and reduction rules (Barrett/Montgomery-style arithmetic)
 often sit inside the innermost loops.
@@ -58,7 +63,7 @@ often sit inside the innermost loops.
 \textbf{Why these kernels matter here.} Both assignments stress the same
 systems challenge: get a high-level numerical idea (FFT-like recursion;
 Boolean cube folding) through a modern array compiler without silently changing
-semantics. JAX makes that easy to prototype but easy to break when integer
+semantics. JAX \cite{jax2018} makes that easy to prototype but easy to break when integer
 widening, staging, or loop lowering change the graph.
 
 \textbf{What we validate and measure.} All required public tests pass for both
@@ -88,7 +93,7 @@ path regular across the batch dimension.
 
 The modular arithmetic hot path uses unsigned 32-bit values, with widening only
 where multiplication requires it. The optimized path converts values into
-Montgomery form in \texttt{prepare\_tables}. The precomputed tables include a
+Montgomery form in \texttt{prepare\_tables} \cite{montgomery1985}. The precomputed tables include a
 pretwisted $\psi$ table and Montgomery-form stage twiddles. The default path
 uses JAX reshapes and vectorized Gentleman--Sande DIF butterfly stages, which
 run on both CPU and GPU backends. Reshape isolates contiguous butterfly halves
@@ -121,21 +126,21 @@ repository root, prefix Assignment~1 commands with
 \texttt{uv --directory assignment1}; the internal benchmark wrapper changes its
 working directory accordingly.
 
-\begin{table}[t]
+\begin{table}[htbp]
 \caption{Assignment 1 correctness checks (\texttt{uv --directory assignment1})}
 \label{tab:a1-correctness}
 \centering
 \footnotesize
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.62\columnwidth}l@{}}
-\hline
+\begin{tabularx}{\columnwidth}{@{}>{\raggedright\arraybackslash}X l@{}}
+\toprule
 Command & Result \\
-\hline
+\midrule
 \texttt{uv run pytest} & 5 passed \\
 \texttt{uv run pytest --logn 10 --batch 4} & 5 passed \\
 \texttt{uv run python -m tests.benchmark}\newline\texttt{--tests --logn 10 --batch 4} & 5 passed \\
-\hline
-\end{tabular}
+\bottomrule
+\end{tabularx}
 \end{table}
 
 \subsection{Performance}
@@ -145,7 +150,7 @@ Table~\ref{tab:a1-perf}: it peaks near $N=65536$, where there is enough
 parallelism to amortize launches while arrays still fit relatively well for
 reuse, then softens at $N=2^{24}$ as traffic dominates.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
@@ -171,24 +176,22 @@ reuse, then softens at $N=2^{24}$ as traffic dominates.
 \label{fig:ntt-throughput}
 \end{figure}
 
-\begin{table}[t]
+\begin{table}[htbp]
 \caption{Assignment 1 A100 scaling sweep, batch 1}
 \label{tab:a1-perf}
 \centering
 \footnotesize
-\setlength{\tabcolsep}{3pt}
-\resizebox{\columnwidth}{!}{%
+\setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}rrrrr@{}}
-\hline
+\toprule
 $\log_2(N)$ & $N$ & Compile (ms) & Median (ms) & Mcoeff/s \\
-\hline
+\midrule
 10 & 1024     & 709  & 0.081 & 50 \\
 16 & 65536    & 1700 & 0.734 & 5711 \\
 20 & 1048576  & 2346 & 6.58  & 5100 \\
 24 & 16777216 & 7031 & 37.0  & 3625 \\
-\hline
-\end{tabular}%
-}
+\bottomrule
+\end{tabular}
 \end{table}
 
 \section{Assignment 2: SumCheck}
@@ -282,21 +285,21 @@ environment they were launched from the repository root with
 \texttt{uv --directory assignment2}. We also ran \texttt{bash scripts/make\_submission.sh}
 as an aggregate bundle before packaging (91 tests passed).
 
-\begin{table}[t]
+\begin{table}[htbp]
 \caption{Assignment 2 required 32-bit correctness (\texttt{uv --directory assignment2})}
 \label{tab:a2-correctness}
 \centering
 \footnotesize
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.62\columnwidth}l@{}}
-\hline
+\begin{tabularx}{\columnwidth}{@{}>{\raggedright\arraybackslash}X l@{}}
+\toprule
 Command & Result \\
-\hline
+\midrule
 \texttt{uv run pytest --bits 32 --num-vars 4} & 20/20 passed \\
 \texttt{uv run pytest --bits 32 --num-vars 16} & 20/20 passed \\
 \texttt{uv run pytest --bits 32 --num-vars 20} & 20/20 passed \\
-\hline
-\end{tabular}
+\bottomrule
+\end{tabularx}
 \end{table}
 
 \subsection{Performance}
@@ -305,7 +308,7 @@ Figures~\ref{fig:sc-expr} and \ref{fig:sc-scale} summarize SumCheck latency
 trends using representative \emph{midpoints} of the measured ranges in
 Tables~\ref{tab:a2-vars20} and \ref{tab:a2-scaling} (GPU at vars20; CPU scaling).
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
@@ -331,7 +334,7 @@ expressions; midpoints of Table~\ref{tab:a2-vars20} ranges.}
 \label{fig:sc-expr}
 \end{figure}
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
@@ -363,21 +366,21 @@ lines. Extracted latency/throughput summaries appear in
 Tables~\ref{tab:a2-vars20}--\ref{tab:a2-compile}; compile-time-focused
 comparisons isolate JAX/XLA staging effects at vars20.
 
-\begin{table}[t]
+\begin{table}[htbp]
 \caption{Required SumCheck benchmark commands (\texttt{uv --directory assignment2})}
 \label{tab:a2-bench-cmds}
 \centering
 \footnotesize
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.62\columnwidth}@{}}
-\hline
+\begin{tabularx}{\columnwidth}{@{}>{\raggedright\arraybackslash}X@{}}
+\toprule
 Command \\
-\hline
+\midrule
 \texttt{uv run python -m tests.benchmark --bench --bits 32 --num-vars 4 --runs 8 --warmup 3} \\
 \texttt{uv run python -m tests.benchmark --bench --bits 32 --num-vars 16 --runs 8 --warmup 3} \\
 \texttt{uv run python -m tests.benchmark --bench --bits 32 --num-vars 20 --runs 8 --warmup 3} \\
-\hline
-\end{tabular}
+\bottomrule
+\end{tabularx}
 \end{table}
 
 Across vars20 GPU runs, median latency ranks the base expressions as
@@ -389,24 +392,22 @@ time also grows with evaluator complexity; Table~\ref{tab:a2-compile} shows
 that implementation choices can move compile time materially even when median
 run time stays in the same band.
 
-\begin{table}[t]
+\begin{table}[htbp]
 \caption{Assignment 2 vars20 A100 benchmark, 32-bit}
 \label{tab:a2-vars20}
 \centering
 \footnotesize
 \setlength{\tabcolsep}{3pt}
-\resizebox{\columnwidth}{!}{%
 \begin{tabular}{@{}lrrr@{}}
-\hline
+\toprule
 Expression & Compile (ms) & Median (ms) & Mpts/s \\
-\hline
+\midrule
 \texttt{a}       & $\approx$2083--2387 & 0.2--0.3 & 3330--4290 \\
 \texttt{a*b}     & $\approx$3792--4175 & 0.3--0.4 & 2420--3030 \\
 \texttt{a*b + c} & $\approx$4832--5271 & 0.4--0.5 & 2080--2530 \\
 \texttt{a*b*c}   & $\approx$6299--6890 & 0.5--0.6 & 1890--2170 \\
-\hline
-\end{tabular}%
-}
+\bottomrule
+\end{tabular}
 \end{table}
 
 Table~\ref{tab:a2-advanced} reports the optional 32-bit advanced polynomials
@@ -414,20 +415,20 @@ on vars20. These are not required for the base benchmark, but they demonstrate
 that the general expression evaluator supports repeated factors and multiple
 additive terms without special-case kernels.
 
-\begin{table}[t]
+\begin{table}[htbp]
 \caption{Assignment 2 vars20 A100 advanced polynomials, 32-bit}
 \label{tab:a2-advanced}
 \centering
 \footnotesize
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}lrr@{}}
-\hline
+\toprule
 Expression & Median (ms) & Mpts/s \\
-\hline
+\midrule
 \texttt{a*a*b*b*c}       & 0.7--0.8 & 1200--1390 \\
 \texttt{a*b*c + d*e}     & 0.5--0.6 & 1520--1800 \\
 \texttt{a*b*c*g + d*e*g} & 0.7--0.8 & 1210--1390 \\
-\hline
+\bottomrule
 \end{tabular}
 \end{table}
 
@@ -439,47 +440,43 @@ widening operations in add/sub, less unused table dataflow, and fewer redundant
 modular additions. Runtime remains close because both versions still scan and
 fold the same $2^{20}$-entry tables.
 
-\begin{table}[t]
+\begin{table}[htbp]
 \caption{Assignment 2 vars20 compile-time comparison}
 \label{tab:a2-compile}
 \centering
 \footnotesize
 \setlength{\tabcolsep}{3pt}
-\resizebox{\columnwidth}{!}{%
 \begin{tabular}{@{}lrrr@{}}
-\hline
+\toprule
 Expression & Reference (ms) & Final (ms) & Improvement \\
-\hline
+\midrule
 \texttt{a}       & 2457 & 2173 & 12\% \\
 \texttt{a*b}     & 4604 & 3941 & 14\% \\
 \texttt{a*b + c} & 5312 & 5059 & 5\% \\
 \texttt{a*b*c}   & 7368 & 6624 & 10\% \\
-\hline
-\end{tabular}%
-}
+\bottomrule
+\end{tabular}
 \end{table}
 
 The local CPU baseline is retained in Table~\ref{tab:a2-scaling}. It shows the
 same expression ordering, but with much higher vars20 latency.
 
-\begin{table}[t]
+\begin{table}[htbp]
 \caption{Assignment 2 scaling by variable count, representative CPU medians}
 \label{tab:a2-scaling}
 \centering
-\footnotesize
+\scriptsize
 \setlength{\tabcolsep}{2pt}
-\resizebox{\columnwidth}{!}{%
 \begin{tabular}{@{}lrrr@{}}
-\hline
+\toprule
 Expression & vars4 (ms) & vars16 (ms) & vars20 (ms) \\
-\hline
+\midrule
 \texttt{a}       & 0.005--0.006 & 0.13--0.16 & 1.05--1.09 \\
 \texttt{a*b}     & 0.007--0.011 & 0.36--0.39 & 3.47--3.70 \\
 \texttt{a*b + c} & 0.007--0.008 & 0.45--0.54 & 6.01--6.41 \\
 \texttt{a*b*c}   & 0.007--0.008 & 0.54--0.59 & 7.98--8.45 \\
-\hline
-\end{tabular}%
-}
+\bottomrule
+\end{tabular}
 \end{table}
 
 \section{Cross-Assignment Discussion}
@@ -531,5 +528,20 @@ pre-folding) and reducing unnecessary widening in the 32-bit add/sub path.
 \textbf{Main limitation:} first-run JAX/XLA compilation remains a large fraction
 of wall time at vars20, and our headline GPU numbers come from HPC-class
 hardware rather than a minimal lab GPU.
+
+\begin{thebibliography}{1}
+
+\bibitem{jax2018}
+JAX Development Team, ``{JAX}: composable transformations of {P}ython+{N}um{P}y programs,'' 2018--2025. [Online]. Available: \url{https://github.com/jax-ml/jax}
+
+\bibitem{montgomery1985}
+P.~L. Montgomery, ``Modular multiplication without trial division,''
+\textit{Mathematics of Computation}, vol.~44, no.~170, pp.~519--521, 1985.
+
+\bibitem{thaler2015}
+J. Thaler, ``Notes on the sum-check protocol,'' Georgetown University, 2015.
+[Online]. Available: \url{https://people.cs.georgetown.edu/jthaler/sumcheck.pdf}
+
+\end{thebibliography}
 
 \end{document}
